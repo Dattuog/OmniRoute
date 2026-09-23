@@ -235,17 +235,17 @@ export function applyIntelligentRoutingConfigPatch(
   patch: Record<string, unknown>
 ): Record<string, unknown> & IntelligentRoutingConfig {
   const normalized = normalizeIntelligentRoutingConfig(config);
-  const editsWeights = isRecord(patch.weights);
+  const weightPatch = isRecord(patch.weights) ? patch.weights : null;
   return {
     ...config,
     ...normalized,
     ...patch,
-    modePack: editsWeights
+    modePack: weightPatch
       ? "custom"
       : ((patch.modePack as string | undefined) ?? normalized.modePack),
     weights: {
       ...normalized.weights,
-      ...(editsWeights ? patch.weights : {}),
+      ...(weightPatch ?? {}),
     },
   };
 }
