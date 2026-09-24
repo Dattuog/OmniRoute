@@ -411,6 +411,12 @@ async function* parseClaudeWebEvents(
     const semanticEvent = dispatchProtocolEvent(eventType, event, state);
     if (!semanticEvent) continue;
     yield semanticEvent;
+    if (semanticEvent.kind === "tool_call") {
+      state.phase = "stopped";
+      state.stopReason = "tool_use";
+      yield { kind: "finish", stopReason: state.stopReason };
+      return;
+    }
     if (semanticEvent.kind === "finish") return;
   }
 
@@ -489,6 +495,17 @@ function notifyFailure(options: ClaudeWebStreamOptions): void {
   }
 }
 
+function logProtocolFailure(options: ClaudeWebStreamOptions, error: unknown): void {
+  const reason =
+    error instanceof ClaudeWebProtocolError
+      ? error.message
+      : "Unexpected error while processing the upstream stream";
+  options.log?.error?.(
+    "CLAUDE-WEB-STREAM",
+    `Claude Web stream protocol validation failed: ${reason}`
+  );
+}
+
 function notifyComplete(
   options: ClaudeWebStreamOptions,
   result: { assistantText: string; stopReason: string }
@@ -565,8 +582,8 @@ async function createBufferedResponse(
         headers: responseHeaders("application/json", options.responseMetadata),
       }
     );
-  } catch {
-    options.log?.error?.("CLAUDE-WEB-STREAM", "Claude Web stream protocol validation failed");
+  } catch (error) {
+    logProtocolFailure(options, error);
     notifyFailure(options);
     return new Response(JSON.stringify(protocolErrorBody()), {
       status: 502,
@@ -697,8 +714,12 @@ async function queueSemanticEvent(
   state.terminal = true;
 }
 
-function queueStreamFailure(state: StreamingState, options: ClaudeWebStreamOptions): void {
-  options.log?.error?.("CLAUDE-WEB-STREAM", "Claude Web stream protocol validation failed");
+function queueStreamFailure(
+  state: StreamingState,
+  options: ClaudeWebStreamOptions,
+  error: unknown
+): void {
+  logProtocolFailure(options, error);
   failStreamOnce(state, options);
   state.pendingChunks.push(encodeStreamEvent(state, protocolErrorBody()));
   state.pendingChunks.push(state.encoder.encode("data: [DONE]\n\n"));
@@ -729,9 +750,9 @@ async function pullStreamingChunk(
         return;
       }
     }
-  } catch {
+  } catch (error) {
     if (state.control.cancelled) return;
-    queueStreamFailure(state, options);
+    queueStreamFailure(state, options, error);
     flushStreamChunk(state, controller);
   }
 }
