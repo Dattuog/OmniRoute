@@ -240,9 +240,10 @@ export function applyIntelligentRoutingConfigPatch(
     ...config,
     ...normalized,
     ...patch,
-    modePack: weightPatch
-      ? "custom"
-      : ((patch.modePack as string | undefined) ?? normalized.modePack),
+    modePack:
+      weightPatch !== null
+        ? "custom"
+        : ((patch.modePack as string | undefined) ?? normalized.modePack),
     weights: {
       ...normalized.weights,
       ...(weightPatch ?? {}),
