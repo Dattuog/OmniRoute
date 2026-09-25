@@ -25,6 +25,27 @@ function idleByteStream(text: string, onCancel: () => void): ReadableStream<Uint
   });
 }
 
+function timedByteStream(
+  chunks: Array<{ delayMs: number; text: string }>,
+  onCancel: () => void
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const timers: Array<ReturnType<typeof setTimeout>> = [];
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) {
+        timers.push(
+          setTimeout(() => controller.enqueue(encoder.encode(chunk.text)), chunk.delayMs)
+        );
+      }
+    },
+    cancel() {
+      for (const timer of timers) clearTimeout(timer);
+      onCancel();
+    },
+  });
+}
+
 async function readResponseWithTimeout(response: Response, timeoutMs = 250): Promise<string> {
   const reader = response.body?.getReader();
   assert.ok(reader, "Expected a streaming response body");
@@ -252,6 +273,121 @@ describe("Claude Web tool_use protocol (#9408)", () => {
     assert.equal(upstreamCancelled, true);
     assert.deepEqual(completions, [{ assistantText: "", stopReason: "tool_use" }]);
     assert.equal(failures, 0);
+  });
+
+  it("emits every queued tool call before terminating an idle stream", async () => {
+    const events = [
+      { type: "message_start", message: { model: "claude-sonnet-5" } },
+      {
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "tool_use",
+          id: "toolu_14711_001",
+          name: "read_file",
+          input: { path: "README.md" },
+        },
+      },
+      { type: "content_block_stop", index: 0 },
+      {
+        type: "content_block_start",
+        index: 1,
+        content_block: {
+          type: "tool_use",
+          id: "toolu_14711_002",
+          name: "read_file",
+          input: { path: "AGENTS.md" },
+        },
+      },
+      { type: "content_block_stop", index: 1 },
+    ];
+    let upstreamCancelled = false;
+
+    const response = await createClaudeWebResponse(
+      idleByteStream(frames(events), () => {
+        upstreamCancelled = true;
+      }),
+      {
+        model: "claude-sonnet-5",
+        stream: true,
+        responseMetadata: {},
+        onComplete() {},
+        onFailure() {},
+      }
+    );
+
+    const output = await readResponseWithTimeout(response);
+    assert.match(output, /"id":"toolu_14711_001"/);
+    assert.match(output, /"id":"toolu_14711_002"/);
+    assert.match(output, /"finish_reason":"tool_calls"/);
+    assert.match(output, /data: \[DONE\]/);
+    assert.equal(upstreamCancelled, true);
+  });
+
+  it("does not terminate while a sibling tool block is still arriving", async () => {
+    const firstTool = frames([
+      { type: "message_start", message: { model: "claude-sonnet-5" } },
+      {
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "tool_use",
+          id: "toolu_14711_001",
+          name: "read_file",
+          input: { path: "README.md" },
+        },
+      },
+      { type: "content_block_stop", index: 0 },
+    ]);
+    const secondToolStart = frames([
+      {
+        type: "content_block_start",
+        index: 1,
+        content_block: {
+          type: "tool_use",
+          id: "toolu_14711_002",
+          name: "search_code",
+          input: {},
+        },
+      },
+    ]);
+    const secondToolDelta = frames([
+      {
+        type: "content_block_delta",
+        index: 1,
+        delta: { type: "input_json_delta", partial_json: '{"query":"stream"}' },
+      },
+    ]);
+    const secondToolStop = frames([{ type: "content_block_stop", index: 1 }]);
+    let upstreamCancelled = false;
+
+    const response = await createClaudeWebResponse(
+      timedByteStream(
+        [
+          { delayMs: 0, text: firstTool },
+          { delayMs: 20, text: secondToolStart },
+          { delayMs: 45, text: secondToolDelta },
+          { delayMs: 70, text: secondToolStop },
+        ],
+        () => {
+          upstreamCancelled = true;
+        }
+      ),
+      {
+        model: "claude-sonnet-5",
+        stream: true,
+        responseMetadata: {},
+        onComplete() {},
+        onFailure() {},
+      }
+    );
+
+    const output = await readResponseWithTimeout(response);
+    assert.match(output, /"id":"toolu_14711_001"/);
+    assert.match(output, /"id":"toolu_14711_002"/);
+    assert.match(output, /"arguments":"\{\\"query\\":\\"stream\\"\}"/);
+    assert.match(output, /"finish_reason":"tool_calls"/);
+    assert.equal(upstreamCancelled, true);
   });
 
   it("handles tool_use alongside text content", async () => {
